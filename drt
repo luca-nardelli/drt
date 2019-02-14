@@ -93,7 +93,7 @@ def add_variant(args: argparse.Namespace):
     touch("Dockerfile")
     os.makedirs('assets')
     with open('.dockerignore', 'w') as file:
-        file.writelines(['**', '!assets'])
+        file.write('\n'.join(['**', '!assets']))
 
 
 def goto_root():
