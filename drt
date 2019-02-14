@@ -1,0 +1,301 @@
+#! /usr/bin/env python3
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from typing import Generator, List
+
+
+class Config:
+    def __init__(self):
+        self.registry = None
+
+    @staticmethod
+    def load(filepath: str):
+        with open(filepath, 'r') as file:
+            dic = json.load(file)
+            cfg = Config()
+            cfg.from_dict(dic)
+            return cfg
+
+    def to_dict(self):
+        return self.__dict__
+
+    def from_dict(self, dic: dict):
+        for att, val in self.__dict__.items():
+            if att in dic:
+                setattr(self, att, dic[att])
+
+    def save(self, filepath: str):
+        with open(filepath, 'w') as file:
+            json.dump(self.to_dict(), file, indent=2)
+
+
+class Image:
+    def __init__(self, base_path, name):
+        self.base_path = base_path
+        self.name = name
+
+    def get_full_path(self):
+        return os.path.join(self.base_path, self.name)
+
+
+class ImageVariant:
+    def __init__(self, img: Image, path: str):
+        self.parent = img
+        self.path = path.replace(img.get_full_path(), "").lstrip("/")
+        self.name = self.path.replace("/", "-")
+
+    def get_full_path(self):
+        return os.path.join(self.parent.get_full_path(), self.path)
+
+
+def touch(filepath: str):
+    from pathlib import Path
+    Path(filepath).touch()
+
+
+def init(args: argparse.Namespace):
+    if os.path.exists('drt.json'):
+        print('This project already exists')
+        return
+    cfg = Config()
+    while cfg.registry is None:
+        print("Please input your registry (e.g. registry.gitlab.com/<user>/<repo)")
+        cfg.registry = input("Registry: ")
+
+    res = subprocess.run(["git", "init"], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    if res.returncode != 0:
+        raise RuntimeError("Error running git init: {}", res.stderr)
+
+    with open(".gitignore", "w") as file:
+        file.writelines(["logs"])
+
+    # Setup files
+    cfg.save("drt.json")
+    os.makedirs("images")
+    os.makedirs("logs")
+
+
+# TODO Verify that we are in the images subfolder of a DRT project
+def add_image(args: argparse.Namespace):
+    os.makedirs(args.imagename)
+    os.chdir(args.imagename)
+    touch('drt-image.json')
+
+
+# TODO Verify that we are in a subfolder of an image
+def add_variant(args: argparse.Namespace):
+    os.makedirs(args.variant)
+    os.chdir(args.variant)
+    touch("Dockerfile")
+    os.makedirs('assets')
+    with open('.dockerignore', 'w') as file:
+        file.writelines(['**', '!assets'])
+
+
+def goto_root():
+    while 'drt.json' not in os.listdir('.'):
+        os.chdir('..')
+        if os.path.realpath('.') == os.path.realpath(".."):
+            raise RuntimeError("No drt.json found, maybe you are not in a DRT project?")
+
+
+# Detect whether we are in a Variant, Image or in the root of the repo
+# Sets cwd to the root of the repo
+def whereami() -> (Image, ImageVariant):
+    variant_path = None
+    image_path = None
+    while True:
+        elems = os.listdir('.')
+        if "drt.json" in elems:
+            break
+        if "drt-image.json" in elems:
+            image_path = os.path.abspath(os.getcwd())
+        if "Dockerfile" in elems:
+            variant_path = os.path.abspath(os.getcwd())
+        if os.path.realpath('.') == os.path.realpath(".."):
+            raise RuntimeError("No drt.json found, maybe you are not in a DRT project?")
+        os.chdir('..')
+    img = None
+    variant = None
+    if image_path:
+        img = Image(os.path.dirname(image_path), os.path.basename(image_path))
+        if variant_path:
+            variant = ImageVariant(img, variant_path)
+    # print(image_path)
+    # print(variant_path)
+    return img, variant
+
+
+def get_images() -> Generator[Image, None, None]:
+    goto_root()
+    for root, dirs, files in os.walk('./images'):
+        for f in files:
+            if f == 'drt-image.json':
+                img_name = os.path.basename(root)
+                yield Image(os.path.dirname(root), img_name)
+
+
+def get_variants(img: Image) -> Generator[ImageVariant, None, None]:
+    for root, dirs, files in os.walk(img.get_full_path()):
+        for f in files:
+            if f == 'Dockerfile':
+                variant = os.path.relpath(root, img.get_full_path())
+                yield ImageVariant(img, variant)
+                # Empty dirs so that we don't recurse, as we can't have images inside images
+                dirs[:] = []
+
+
+def build_variant(var: ImageVariant, prefixes: List[str] = None):
+    sys.stdout.write("Building {}:{}".format(var.parent.name, var.name))
+    log_dir = os.path.join("logs", var.parent.name, var.name)
+    os.makedirs(log_dir, exist_ok=True)
+    with open(os.path.join(log_dir, 'log.txt'), 'w') as log_file:
+        tags = []
+        tags.append('-t')
+        tags.append("{}:{}".format(var.parent.name, var.name))
+        if prefixes is not None:
+            for p in prefixes:
+                tags.append('-t')
+                tags.append("{}/{}:{}".format(p, var.parent.name, var.name))
+        res = subprocess.run(['docker', 'build'] + tags + [var.get_full_path()], stderr=log_file, stdout=log_file)
+    if res.returncode == 0:
+        print("  OK")
+        for t in tags:
+            if t != '-t':
+                print("Tagged as {}".format(t))
+    else:
+        print("  ERROR: see {}/log.txt".format(log_dir))
+
+
+def push_variant(var: ImageVariant, registry: str):
+    img_full_name = "{}/{}:{}".format(registry, var.parent.name, var.name)
+    sys.stdout.write("Pushing {}".format(img_full_name))
+    log_dir = os.path.join("logs", var.parent.name, var.name)
+    os.makedirs(log_dir, exist_ok=True)
+    with open(os.path.join(log_dir, 'log-push.txt'), 'w') as log_file:
+        res = subprocess.run(['docker', 'push', img_full_name], stderr=log_file)
+    if res.returncode == 0:
+        print("  OK")
+    else:
+        print("  ERROR: see {}/log-push.txt".format(log_dir))
+
+
+def build(args: argparse.Namespace):
+    img, variant = whereami()
+
+    cfg = Config.load('drt.json')
+
+    if variant:
+        build_variant(variant, prefixes=[cfg.registry])
+    elif img:
+        for var in get_variants(img):
+            build_variant(var, prefixes=[cfg.registry])
+    else:
+        for img in get_images():
+            for var in get_variants(img):
+                build_variant(var, prefixes=[cfg.registry])
+
+
+def push(args: argparse.Namespace):
+    img, variant = whereami()
+
+    cfg = Config.load('drt.json')
+
+    if variant:
+        push_variant(variant, registry=cfg.registry)
+    elif img:
+        for var in get_variants(img):
+            push_variant(var, registry=cfg.registry)
+    else:
+        for img in get_images():
+            for var in get_variants(img):
+                push_variant(var, registry=cfg.registry)
+
+
+def list_images(args: argparse.Namespace):
+    for img in get_images():
+        print(img.name)
+        for var in get_variants(img):
+            print("    {}".format(var.name))
+
+
+def set_registry(args: argparse.Namespace):
+    goto_root()
+    cfg = Config.load('drt.json')
+    cfg.registry = args.registry
+    cfg.save('drt.json')
+
+
+cmd = argparse.ArgumentParser(
+    prog="drt",
+    description="Docker Repository management Tool. Helps to build and tag images in a reproducible way"
+)
+
+subp = cmd.add_subparsers(
+    title="Subcommands",
+    description="Available commands",
+    dest="cmd"
+)
+p = subp.add_parser(
+    name="init",
+    help="Initializes an empty repo"
+)
+p.add_argument("--func", help=argparse.SUPPRESS, default=init)
+
+p = subp.add_parser(
+    name="add-image",
+    help="Adds a new image"
+)
+p.add_argument("imagename", help="Image name")
+p.add_argument("--func", help=argparse.SUPPRESS, default=add_image)
+
+p = subp.add_parser(
+    name="add-variant",
+    help="Adds a new variant to an existing image"
+)
+p.add_argument("variant", help="Variant name")
+p.add_argument("--func", help=argparse.SUPPRESS, default=add_variant)
+
+p = subp.add_parser(
+    name="ls",
+    help="Lists the images in this repo"
+)
+p.add_argument("--func", help=argparse.SUPPRESS, default=list_images)
+
+# SET subsubcommand
+p = subp.add_parser(
+    name="set",
+    help="Sets one of the properties of the repo"
+)
+psubp = p.add_subparsers()
+pp = psubp.add_parser(
+    name="registry",
+    help="Registry where to push"
+)
+pp.add_argument("registry", help="registry url (e.g. registry.gitlab.com/<user>/<repo> for gitlab or @<user> for dockerhub)")
+pp.add_argument("--func", help=argparse.SUPPRESS, default=set_registry)
+# End SET
+
+p = subp.add_parser(
+    name="build",
+    help="Builds all the images"
+)
+p.add_argument("--func", help=argparse.SUPPRESS, default=build)
+
+p = subp.add_parser(
+    name="push",
+    help="Pushes all the images"
+)
+p.add_argument("--func", help=argparse.SUPPRESS, default=push)
+
+args = cmd.parse_args(sys.argv[1:])
+
+if len(sys.argv) <= 1:
+    cmd.print_help()
+
+if hasattr(args, 'func'):
+    args.func(args)
