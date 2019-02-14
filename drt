@@ -149,9 +149,12 @@ def get_variants(img: Image) -> Generator[ImageVariant, None, None]:
                 dirs[:] = []
 
 
-def build_variant(var: ImageVariant, prefixes: List[str] = None):
-    sys.stdout.write("Building {}:{}".format(var.parent.name, var.name))
-    sys.stdout.flush()
+def build_variant(var: ImageVariant, prefixes: List[str] = None, show_output=False):
+    if show_output:
+        print("Building {}:{}".format(var.parent.name, var.name))
+    else:
+        sys.stdout.write("Building {}:{}".format(var.parent.name, var.name))
+        sys.stdout.flush()
     log_dir = os.path.join("logs", var.parent.name, var.name)
     os.makedirs(log_dir, exist_ok=True)
     with open(os.path.join(log_dir, 'log.txt'), 'w') as log_file:
@@ -162,14 +165,30 @@ def build_variant(var: ImageVariant, prefixes: List[str] = None):
             for p in prefixes:
                 tags.append('-t')
                 tags.append("{}/{}:{}".format(p, var.parent.name, var.name))
-        res = subprocess.run(['docker', 'build'] + tags + [var.get_full_path()], stderr=log_file, stdout=log_file)
-    if res.returncode == 0:
-        print("  OK")
+        if show_output:
+            proc = subprocess.Popen(['docker', 'build'] + tags + [var.get_full_path()], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+            # https://stackoverflow.com/questions/21689365/python-3-typeerror-must-be-str-not-bytes-with-sys-stdout-write
+            for line in proc.stdout:
+                sys.stdout.buffer.write(line)
+                sys.stdout.flush()
+            res = proc.wait()
+        else:
+            res = subprocess.run(['docker', 'build'] + tags + [var.get_full_path()], stderr=log_file, stdout=log_file)
+            res = res.returncode
+    if res == 0:
+        if show_output:
+            print("OK")
+        else:
+            print("  OK")
         for t in tags:
             if t != '-t':
                 print("Tagged as {}".format(t))
     else:
-        print("  ERROR: see {}/log.txt".format(log_dir))
+        if show_output:
+            print("ERROR: see {}/log.txt".format(log_dir))
+        else:
+            print("  ERROR: see {}/log.txt".format(log_dir))
+
 
 
 def push_variant(var: ImageVariant, registry: str):
@@ -191,14 +210,14 @@ def build(args: argparse.Namespace):
     cfg = Config.load('drt.json')
 
     if variant:
-        build_variant(variant, prefixes=[cfg.registry])
+        build_variant(variant, prefixes=[cfg.registry], show_output=args.verbose)
     elif img:
         for var in get_variants(img):
-            build_variant(var, prefixes=[cfg.registry])
+            build_variant(var, prefixes=[cfg.registry], show_output=args.verbose)
     else:
         for img in get_images():
             for var in get_variants(img):
-                build_variant(var, prefixes=[cfg.registry])
+                build_variant(var, prefixes=[cfg.registry], show_output=args.verbose)
 
 
 def push(args: argparse.Namespace):
@@ -286,6 +305,7 @@ p = subp.add_parser(
     help="Builds all the images"
 )
 p.add_argument("--func", help=argparse.SUPPRESS, default=build)
+p.add_argument("-v", "--verbose", help="Verbose build, see output", action='store_true', default=False)
 
 p = subp.add_parser(
     name="push",
