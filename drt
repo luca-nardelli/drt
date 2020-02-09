@@ -133,6 +133,7 @@ def whereami() -> (Image, ImageVariant):
 def get_images() -> Generator[Image, None, None]:
     goto_root()
     for root, dirs, files in os.walk('./images'):
+        dirs.sort()  # Lexical sort for directories
         for f in files:
             if f == 'drt-image.json':
                 img_name = os.path.basename(root)
@@ -141,6 +142,7 @@ def get_images() -> Generator[Image, None, None]:
 
 def get_variants(img: Image) -> Generator[ImageVariant, None, None]:
     for root, dirs, files in os.walk(img.get_full_path()):
+        dirs.sort()  # Lexical sort for directories
         for f in files:
             if f == 'Dockerfile':
                 variant = os.path.relpath(root, img.get_full_path())
@@ -188,7 +190,6 @@ def build_variant(var: ImageVariant, prefixes: List[str] = None, show_output=Fal
             print("ERROR: see {}/log.txt".format(log_dir))
         else:
             print("  ERROR: see {}/log.txt".format(log_dir))
-
 
 
 def push_variant(var: ImageVariant, registry: str):
