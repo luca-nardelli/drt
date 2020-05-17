@@ -105,11 +105,12 @@ def goto_root():
 
 # Detect whether we are in a Variant, Image or in the root of the repo
 # Sets cwd to the root of the repo
-def whereami() -> (Image, ImageVariant):
+def whereami(path: str = ".") -> (Image, ImageVariant):
     variant_path = None
     image_path = None
+    os.chdir(path)
     while True:
-        elems = os.listdir('.')
+        elems = os.listdir(None)
         if "drt.json" in elems:
             break
         if "drt-image.json" in elems:
@@ -206,7 +207,7 @@ def push_variant(var: ImageVariant, registry: str):
 
 
 def build(args: argparse.Namespace):
-    img, variant = whereami()
+    img, variant = whereami(args.dir)
 
     cfg = Config.load('drt.json')
 
@@ -307,6 +308,7 @@ p = subp.add_parser(
 )
 p.add_argument("--func", help=argparse.SUPPRESS, default=build)
 p.add_argument("-v", "--verbose", help="Verbose build, see output", action='store_true', default=False)
+p.add_argument("dir")
 
 p = subp.add_parser(
     name="push",
