@@ -308,7 +308,7 @@ p = subp.add_parser(
 )
 p.add_argument("--func", help=argparse.SUPPRESS, default=build)
 p.add_argument("-v", "--verbose", help="Verbose build, see output", action='store_true', default=False)
-p.add_argument("dir")
+p.add_argument("dir", nargs='?', default=os.getcwd())
 
 p = subp.add_parser(
     name="push",
