@@ -10,7 +10,9 @@ from typing import Generator, List
 
 class Config:
     def __init__(self):
-        self.registry = None
+        self.registry: str = None
+        self.architectures: List[str] = []
+        self.my_arch = 'linux/amd64'
 
     @staticmethod
     def load(filepath: str):
@@ -18,6 +20,12 @@ class Config:
             dic = json.load(file)
             cfg = Config()
             cfg.from_dict(dic)
+
+            # Detect architecture
+            info = subprocess.run(['uname','-a'], capture_output=True, text=True).stdout
+
+            if 'Darwin' in info and 'arm64' in info:
+                cfg.my_arch = 'mac_arm64'
             return cfg
 
     def to_dict(self):
@@ -152,7 +160,8 @@ def get_variants(img: Image) -> Generator[ImageVariant, None, None]:
                 dirs[:] = []
 
 
-def build_variant(var: ImageVariant, prefixes: List[str] = None, show_output=False):
+def build_variant(var: ImageVariant, cfg: Config = None, show_output=False):
+    prefixes = [cfg.registry]
     if show_output:
         print("Building {}:{}".format(var.parent.name, var.name))
     else:
@@ -168,16 +177,31 @@ def build_variant(var: ImageVariant, prefixes: List[str] = None, show_output=Fal
             for p in prefixes:
                 tags.append('-t')
                 tags.append("{}/{}:{}".format(p, var.parent.name, var.name))
+        build_cmd = ['docker', 'buildx', 'build', '--platform', ','.join(cfg.architectures)] + tags + [var.get_full_path()]
+        print('>>> ' + ' '.join(build_cmd))
         if show_output:
-            proc = subprocess.Popen(['docker', 'build'] + tags + [var.get_full_path()], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+            proc = subprocess.Popen(build_cmd, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
             # https://stackoverflow.com/questions/21689365/python-3-typeerror-must-be-str-not-bytes-with-sys-stdout-write
             for line in proc.stdout:
                 sys.stdout.buffer.write(line)
                 sys.stdout.flush()
             res = proc.wait()
         else:
-            res = subprocess.run(['docker', 'build'] + tags + [var.get_full_path()], stderr=log_file, stdout=log_file)
+            res = subprocess.run(build_cmd, stderr=log_file, stdout=log_file)
             res = res.returncode
+        # Load the image
+        arch_to_load = cfg.my_arch
+        if arch_to_load == 'mac_arm64':
+            arch_to_load = 'linux/arm64'
+        load_cmd = ['docker', 'buildx', 'build', '--load', '--platform', arch_to_load] + tags + [
+            var.get_full_path()]
+        print('>>> ' + ' '.join(load_cmd))
+        proc = subprocess.Popen(load_cmd, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        for line in proc.stdout:
+            sys.stdout.buffer.write(line)
+            sys.stdout.flush()
+        res = proc.wait()
+
     if res == 0:
         if show_output:
             print("OK")
@@ -193,14 +217,27 @@ def build_variant(var: ImageVariant, prefixes: List[str] = None, show_output=Fal
             print("  ERROR: see {}/log.txt".format(log_dir))
 
 
-def push_variant(var: ImageVariant, registry: str):
-    img_full_name = "{}/{}:{}".format(registry, var.parent.name, var.name)
-    sys.stdout.write("Pushing {}".format(img_full_name))
+def push_variant(var: ImageVariant, cfg: Config, show_output=False):
+    img_full_name = "{}/{}:{}".format(cfg.registry, var.parent.name, var.name)
+    sys.stdout.write("Pushing {}\n".format(img_full_name))
     log_dir = os.path.join("logs", var.parent.name, var.name)
+
+    build_cmd = ['docker', 'buildx', 'build', '--push', '--platform', ','.join(cfg.architectures), '-t', img_full_name] + [var.get_full_path()]
+    print('>>> ' + ' '.join(build_cmd))
+
     os.makedirs(log_dir, exist_ok=True)
     with open(os.path.join(log_dir, 'log-push.txt'), 'w') as log_file:
-        res = subprocess.run(['docker', 'push', img_full_name], stderr=log_file)
-    if res.returncode == 0:
+        if show_output:
+            proc = subprocess.Popen(build_cmd, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+            # https://stackoverflow.com/questions/21689365/python-3-typeerror-must-be-str-not-bytes-with-sys-stdout-write
+            for line in proc.stdout:
+                sys.stdout.buffer.write(line)
+                sys.stdout.flush()
+            res = proc.wait()
+        else:
+            res = subprocess.run(build_cmd, stderr=log_file, stdout=log_file)
+            res = res.returncode
+    if res == 0:
         print("  OK")
     else:
         print("  ERROR: see {}/log-push.txt".format(log_dir))
@@ -212,14 +249,14 @@ def build(args: argparse.Namespace):
     cfg = Config.load('drt.json')
 
     if variant:
-        build_variant(variant, prefixes=[cfg.registry], show_output=args.verbose)
+        build_variant(variant, cfg=cfg, show_output=args.verbose)
     elif img:
         for var in get_variants(img):
-            build_variant(var, prefixes=[cfg.registry], show_output=args.verbose)
+            build_variant(var, cfg=cfg, show_output=args.verbose)
     else:
         for img in get_images():
             for var in get_variants(img):
-                build_variant(var, prefixes=[cfg.registry], show_output=args.verbose)
+                build_variant(var, cfg=cfg, show_output=args.verbose)
 
 
 def push(args: argparse.Namespace):
@@ -228,14 +265,14 @@ def push(args: argparse.Namespace):
     cfg = Config.load('drt.json')
 
     if variant:
-        push_variant(variant, registry=cfg.registry)
+        push_variant(variant, cfg=cfg, show_output=args.verbose)
     elif img:
         for var in get_variants(img):
-            push_variant(var, registry=cfg.registry)
+            push_variant(var, cfg=cfg, show_output=args.verbose)
     else:
         for img in get_images():
             for var in get_variants(img):
-                push_variant(var, registry=cfg.registry)
+                push_variant(var, cfg=cfg, show_output=args.verbose)
 
 
 def list_images(args: argparse.Namespace):
@@ -315,6 +352,7 @@ p = subp.add_parser(
     help="Pushes all the images"
 )
 p.add_argument("--func", help=argparse.SUPPRESS, default=push)
+p.add_argument("-v", "--verbose", help="Verbose build, see output", action='store_true', default=False)
 
 args = cmd.parse_args(sys.argv[1:])
 
