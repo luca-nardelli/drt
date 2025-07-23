@@ -215,6 +215,7 @@ def build_variant(var: ImageVariant, cfg: Config = None, show_output=False):
             print("ERROR: see {}/log.txt".format(log_dir))
         else:
             print("  ERROR: see {}/log.txt".format(log_dir))
+        sys.exit(1)
 
 
 def push_variant(var: ImageVariant, cfg: Config, show_output=False):
@@ -241,6 +242,7 @@ def push_variant(var: ImageVariant, cfg: Config, show_output=False):
         print("  OK")
     else:
         print("  ERROR: see {}/log-push.txt".format(log_dir))
+        sys.exit(1)
 
 
 def build(args: argparse.Namespace):
